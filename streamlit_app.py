@@ -115,6 +115,8 @@ def apply_filter(series: pd.Series, selected: list[str]) -> pd.Series:
 
 # ---- Unknown/Missing helpers ----
 
+def _norm_str(s: pd.Series) -> pd.Series:
+    return s.astype("string").str.strip().str.lower()
 def coalesce_unknown(series: pd.Series) -> pd.Series:
     s = series.astype("string").str.strip()
     s_norm = s.str.lower()
@@ -396,31 +398,45 @@ with tab2:
             )
             plotly_show(fig, prefix="tab2_geo_map")
 
-        # --- Pareto bar: include merged "Unknown" bucket
+        # --- Pareto bar: show Top-K countries (always excludes Unknown) ---
         st.markdown("**Pareto of Countries (Top K)**")
-        if base.empty:
+        if df_f.empty:
             st.info("No countries to display for the current filters.")
         else:
-            s_all = coalesce_unknown(base[country_col])  # merges Unknown + Missing -> "Unknown"
-            geo_counts = s_all.value_counts(dropna=False).reset_index()
-            geo_counts.columns = [country_col, "Participants"]
+            pareto_base = df_f.copy()
 
-            # Always include 'Unknown' if present, plus top_k non-Unknown
-            unknown_row = geo_counts[geo_counts[country_col] == "Unknown"]
-            top_non_unknown = geo_counts[geo_counts[country_col] != "Unknown"].nlargest(int(top_k), "Participants")
-            geo_counts_final = pd.concat([top_non_unknown, unknown_row]).drop_duplicates(subset=[country_col])
+            # Exclude only Singapore, case-insensitive
+            if exclude_sg:
+                pareto_base = pareto_base[~_norm_str(pareto_base[country_col]).eq("singapore")].copy()
 
-            total_cnt = float(geo_counts["Participants"].sum()) if not geo_counts.empty else 0.0
+            # Always drop Unknown / Missing
+            s_norm = _norm_str(pareto_base[country_col])
+            mask_unknown = pareto_base[country_col].isna() | s_norm.isin(UNKNOWN_LIKE)
+            s = pareto_base.loc[~mask_unknown, country_col]
 
-            top_countries = geo_counts_final.nlargest(int(top_k), "Participants").copy()
-            top_countries["Share_%"] = (top_countries["Participants"] / total_cnt * 100.0) if total_cnt > 0 else 0.0
+            if s.empty:
+                st.info("No valid countries to display for the current filters.")
+                st.stop()
+
+            # Counts for the FULL shown universe (after SG filter, Unknown removed)
+            counts_df = s.value_counts(dropna=False).reset_index()
+            counts_df.columns = [country_col, "Participants"]
+
+            # This is the denominator for percentages and for the "Top K countries account for ..." note
+            total_universe = int(counts_df["Participants"].sum())
+
+            # Top-K slice (non-Unknown by construction)
+            final_df = counts_df.nlargest(int(top_k), "Participants").copy()
+
+            # Percent labels and caption share are relative to the FULL shown universe
+            final_df["Share_%"] = (final_df["Participants"] / total_universe * 100.0) if total_universe > 0 else 0.0
 
             fig_bar = px.bar(
-                top_countries,
+                final_df,
                 x=country_col,
                 y="Participants",
                 title=f"Top {int(top_k)} Countries by Participants",
-                text=top_countries["Share_%"].round(1).astype(str) + "%",
+                text=final_df["Share_%"].round(1).astype(str) + "%",
             )
             fig_bar.update_traces(textposition="outside", cliponaxis=False)
             fig_bar.update_layout(xaxis_tickangle=-45, yaxis_title="Participants", xaxis_title="Country")
@@ -428,9 +444,11 @@ with tab2:
 
             sg_note = " (Singapore excluded)" if exclude_sg else ""
             st.caption(
-                f"Total participants shown: {int(total_cnt):,}{sg_note}. "
-                f"Top {int(top_k)} countries account for {top_countries['Share_%'].sum():.1f}% of the shown total."
+                f"Total participants shown: {total_universe:,}{sg_note}. "
+                f"Top {int(top_k)} countries account for {final_df['Share_%'].sum():.1f}% of the shown total."
             )
+
+
 
 # --- Tab 3: Programmes × Country
 with tab3:
