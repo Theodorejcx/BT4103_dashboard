@@ -25,7 +25,7 @@ def load_data(path: str = "dashboard_curated_v2.csv") -> pd.DataFrame:
     if "Run_Month" in df.columns:
         df["Run_Month_Label"] = df["Run_Month"].dt.strftime("%Y-%m")
 
-    # Derive Age_Group once (we'll coalesce Unknowns at visualization time)
+    # Derive Age_Group once 
     if "Age" in df.columns:
         age_num = pd.to_numeric(df["Age"], errors="coerce")
         bins    = [0, 34, 44, 54, 64, 200]
@@ -498,83 +498,210 @@ with tab2:
 
 
 
-# --- Tab 3: Programmes × Country
+# --- Tab 3: Programmes × Country (both heatmaps share one %/raw toggle) ---
 with tab3:
-    st.subheader("Top Programmes & Country Breakdown (Heatmap: % Participants)")
+    st.subheader("Top Programmes & Country Breakdown")
 
-    prog_col = "Truncated Programme Name"
+    prog_col    = "Truncated Programme Name"
     country_col = "Country Of Residence"
 
     if (prog_col in df_f.columns) and (country_col in df_f.columns):
         # DQ note only (no checkbox)
-        dq_note_only(df_f, country_col, "Country (Heatmap)")
+        dq_note_only(df_f, country_col, "Country (Heatmaps)")
 
-        # Exclude Singapore toggle (applies to both heatmaps)
+        # Explain ordering logic (applies to both heatmaps)
+        st.caption("Rows in both heatmaps are ordered by total participants after filtering (Unknown removed; Singapore excluded if selected).")
+
+        # Shared controls for both heatmaps
         exclude_sg_tab3 = st.checkbox(
             "Exclude Singapore (reduce skew)", value=False, key="pc_exclude_sg"
         )
+        show_pct_tab3 = st.toggle(
+            "Show % (vs raw counts)", value=True, key="tab3_show_pct"
+        )
 
+        # Base (apply SG exclusion consistently for both HMs)
         base = df_f.copy()
         if exclude_sg_tab3:
-            base = base[base[country_col] != "Singapore"].copy()
+            norm_cty = base[country_col].astype("string").str.strip().str.casefold()
+            base = base.loc[~norm_cty.eq("singapore")].copy()
 
-        # --- Heatmap 1: Programme × Country (overall %), Unknown EXCLUDED for interpretability
+        # -------------------------------
+        # Heatmap 1: Programme × Country
+        # -------------------------------
+        st.markdown("### Heatmap 1 — Programme × Country")
+
+        # Remove Unknown/Missing countries for interpretability
         s = base[country_col].astype("string").str.strip()
         s_norm = s.str.lower()
         mask_unknown = s.isna() | (s == "") | s_norm.isin(UNKNOWN_LIKE)
         base_hm1 = base.loc[~mask_unknown].copy()
 
-        top_progs = base_hm1[prog_col].value_counts().nlargest(top_k).index.tolist()
-        df_top = base_hm1[base_hm1[prog_col].isin(top_progs)].copy()
+        if base_hm1.empty:
+            st.info("No valid Country data for Heatmap 1 after filtering.")
+        else:
+            # Limit rows/cols to Top-K by volume after filtering
+            top_progs = (
+                base_hm1[prog_col].value_counts()
+                .nlargest(int(top_k))
+                .index
+                .tolist()
+            )
+            agg = (
+                base_hm1[base_hm1[prog_col].isin(top_progs)]
+                .groupby([prog_col, country_col])
+                .size()
+                .reset_index(name="Participants")
+            )
+            top_countries = (
+                agg.groupby(country_col)["Participants"].sum()
+                .nlargest(int(top_k))
+                .index
+                .tolist()
+            )
+            agg = agg[agg[country_col].isin(top_countries)]
 
-        agg = df_top.groupby([prog_col, country_col]).size().reset_index(name="Participants")
-        top_c_in_subset = agg.groupby(country_col)["Participants"].sum().nlargest(top_k).index.tolist()
-        agg = agg[agg[country_col].isin(top_c_in_subset)]
+            # Pivot to matrix
+            hm1_counts = (
+                agg.pivot(index=prog_col, columns=country_col, values="Participants")
+                .fillna(0)
+            )
 
-        heatmap_data = agg.pivot(index=prog_col, columns=country_col, values="Participants").fillna(0)
-        total = heatmap_data.values.sum()
-        heatmap_pct = (heatmap_data / total * 100).round(2) if total > 0 else heatmap_data
+            # Order rows by total participants (desc) AFTER filtering
+            hm1_counts = hm1_counts.loc[
+                hm1_counts.sum(axis=1).sort_values(ascending=False).index
+            ]
 
-        fig = px.imshow(
-            heatmap_pct,
-            labels=dict(x="Country Of Residence", y="Programme", color="Percentage (%)"),
-            x=heatmap_pct.columns, y=heatmap_pct.index,
-            color_continuous_scale="Viridis", aspect="auto",
-            title=f"Participants Heatmap (%): Programme × Country (Top {top_k})",
-            text_auto=True,
-        )
-        fig.update_layout(xaxis_title="Country Of Residence", yaxis_title="Programme (Anon)")
-        plotly_show(fig, prefix="tab3_prog_country_heatmap")
+            # Choose matrix + labels + hover per mode
+            if show_pct_tab3:
+                total_sum = hm1_counts.values.sum()
+                hm1_pct = (hm1_counts / total_sum * 100).round(2) if total_sum > 0 else hm1_counts * 0
+                Z = hm1_pct.values
+                x_labels, y_labels = hm1_pct.columns, hm1_pct.index
+                color_label = "Share of total (%)"
+                title_suffix = "(% of total)"
+                text_fmt = ".2f"
+                hover_tmpl = (
+                    "Programme: %{y}<br>"
+                    "Country: %{x}<br>"
+                    "Share of total: %{z:.2f}%"
+                    "<extra></extra>"
+                )
+            else:
+                Z = hm1_counts.values
+                x_labels, y_labels = hm1_counts.columns, hm1_counts.index
+                color_label = "Participants"
+                title_suffix = "(raw)"
+                text_fmt = "d"
+                hover_tmpl = (
+                    "Programme: %{y}<br>"
+                    "Country: %{x}<br>"
+                    "Participants: %{z:.0f}"
+                    "<extra></extra>"
+                )
 
-    # --- Heatmap 2: Top Countries × Primary Category (row %), Unknown ALWAYS excluded
-    st.subheader(f"Distribution of Top {top_k} Countries Across Primary Categories")
-    if ("Primary Category" in df_f.columns) and (country_col in df_f.columns):
-        df_cat_clean = filter_unknown_no_ui(df_f, country_col, include_unknown=False)
-        if exclude_sg_tab3:
-            df_cat_clean = df_cat_clean[df_cat_clean[country_col] != "Singapore"].copy()
+            fig_hm1 = px.imshow(
+                Z,
+                x=x_labels,
+                y=y_labels,
+                color_continuous_scale="Viridis",
+                aspect="auto",
+                labels=dict(x="Country Of Residence", y="Programme", color=color_label),
+                text_auto=text_fmt,
+                title=f"Programme × Country {title_suffix}",
+            )
+            fig_hm1.update_traces(hovertemplate=hover_tmpl)
+            fig_hm1.update_layout(xaxis_title="Country Of Residence", yaxis_title="Programme (Anon)")
+            plotly_show(fig_hm1, prefix="tab3_prog_country_heatmap")
 
-        dq_note_only(df_f, country_col, "Country (by Category)")
-        st.caption("Analysis below **excludes** Unknown + Missing for Country.")
+        # -------------------------------------------------------------
+        # Heatmap 2: Top Countries × Primary Category (row % or raw)
+        # -------------------------------------------------------------
+        st.markdown(f"### Heatmap 2 — Top {top_k} Countries × Primary Category")
 
-        top_countries = df_cat_clean[country_col].value_counts().nlargest(top_k).index.tolist()
-        df_top_cty = df_cat_clean[df_cat_clean[country_col].isin(top_countries)].copy()
+        cat_col = "Primary Category"
+        if cat_col not in df_f.columns:
+            st.info("‘Primary Category’ column not found for Heatmap 2.")
+        else:
+            # Remove Unknown/Missing countries; SG already excluded via base
+            s2 = base[country_col].astype("string").str.strip()
+            s2_norm = s2.str.lower()
+            mask_unknown2 = s2.isna() | (s2 == "") | s2_norm.isin(UNKNOWN_LIKE)
+            base_hm2 = base.loc[~mask_unknown2].copy()
 
-        agg_cat = df_top_cty.groupby([country_col, "Primary Category"]).size().reset_index(name="Participants")
-        heatmap_cat = agg_cat.pivot(index=country_col, columns="Primary Category", values="Participants").fillna(0)
-        heatmap_cat_pct = (heatmap_cat.div(heatmap_cat.sum(axis=1), axis=0) * 100).round(2)
+            if base_hm2.empty:
+                st.info("No valid Country data for Heatmap 2 after filtering.")
+            else:
+                # Pick Top-K countries by total participants AFTER filtering
+                top_countries_hm2 = (
+                    base_hm2[country_col].value_counts()
+                    .nlargest(int(top_k))
+                    .index
+                    .tolist()
+                )
+                df_top_cty = base_hm2[base_hm2[country_col].isin(top_countries_hm2)].copy()
 
-        fig_cat = px.imshow(
-            heatmap_cat_pct,
-            labels=dict(x="Primary Category", y="Country Of Residence", color="Row %"),
-            x=heatmap_cat_pct.columns, y=heatmap_cat_pct.index,
-            color_continuous_scale="Viridis", aspect="auto",
-            title="For each country: % of participants in each Primary Category (Unknown excluded)",
-            text_auto=True,
-        )
-        fig_cat.update_layout(xaxis_title="Primary Category", yaxis_title="Country Of Residence")
-        plotly_show(fig_cat, prefix="tab3_country_primarycat_heatmap")
+                # Build counts matrix: rows=Country, cols=Primary Category
+                agg_cat = (
+                    df_top_cty
+                    .groupby([country_col, cat_col])
+                    .size()
+                    .reset_index(name="Participants")
+                )
+                hm2_counts = (
+                    agg_cat
+                    .pivot(index=country_col, columns=cat_col, values="Participants")
+                    .fillna(0)
+                )
+
+                # Order rows by total participants (desc) AFTER filtering
+                hm2_counts = hm2_counts.loc[
+                    hm2_counts.sum(axis=1).sort_values(ascending=False).index
+                ]
+
+                if show_pct_tab3:
+                    # Row % version (each row sums to 100)
+                    row_sums = hm2_counts.sum(axis=1).replace(0, np.nan)
+                    hm2_pct = (hm2_counts.div(row_sums, axis=0) * 100).round(2).fillna(0)
+                    Z2 = hm2_pct.values
+                    x2, y2 = hm2_pct.columns, hm2_pct.index
+                    color_label2 = "Row %"
+                    title_suffix2 = "(row %)"
+                    text_fmt2 = ".2f"
+                    hover_tmpl2 = (
+                        "Country: %{y}<br>"
+                        "Primary Category: %{x}<br>"
+                        "Row share: %{z:.2f}%"
+                        "<extra></extra>"
+                    )
+                else:
+                    Z2 = hm2_counts.values
+                    x2, y2 = hm2_counts.columns, hm2_counts.index
+                    color_label2 = "Participants"
+                    title_suffix2 = "(raw)"
+                    text_fmt2 = "d"
+                    hover_tmpl2 = (
+                        "Country: %{y}<br>"
+                        "Primary Category: %{x}<br>"
+                        "Participants: %{z:.0f}"
+                        "<extra></extra>"
+                    )
+
+                fig_cat = px.imshow(
+                    Z2,
+                    x=x2,
+                    y=y2,
+                    color_continuous_scale="Viridis",
+                    aspect="auto",
+                    labels=dict(x="Primary Category", y="Country Of Residence", color=color_label2),
+                    text_auto=text_fmt2,
+                    title=f"For each country: distribution {title_suffix2}",
+                )
+                fig_cat.update_traces(hovertemplate=hover_tmpl2)
+                fig_cat.update_layout(xaxis_title="Primary Category", yaxis_title="Country Of Residence")
+                plotly_show(fig_cat, prefix="tab3_country_primarycat_heatmap")
     else:
-        st.info("Required columns not found: ensure ‘Primary Category’ and ‘Country Of Residence’ exist in the dataset.")
+        st.info("Required columns not found: ensure ‘Truncated Programme Name’ and ‘Country Of Residence’ exist in the dataset.")
 
 # --- Tab 4: Titles & Organisations
 with tab4:
