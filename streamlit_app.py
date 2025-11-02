@@ -807,11 +807,40 @@ with tab5:
     st.subheader("Demographics")
 
     if "Age_Group" in df_f.columns:
-        df_age = add_unknown_checkbox_and_note(df_f, "Age_Group", label="Age Group", key="agegroup_tab5", note_style="caption")
-        s = coalesce_unknown(df_age["Age_Group"])
-        order_full = ["<35","35–44","45–54","55–64","65+","Unknown"]
-        agec = (s.value_counts(dropna=False).reindex(order_full).fillna(0).rename_axis("Age Group").reset_index(name="Participants"))
-        safe_plot(agec, lambda: plotly_show(px.bar(agec, x="Age Group", y="Participants", title="Participants by Age Group"), prefix="tab5_agegroup_bar"))
+        # This renders the checkbox + DQ note and returns the filtered df
+        df_age = add_unknown_checkbox_and_note(
+            df_f, "Age_Group", label="Age Group", key="agegroup_tab5", note_style="caption"
+        )
+
+        # Read the checkbox state without modifying the helper
+        include_unknown_age = bool(st.session_state.get("agegroup_tab5", False))
+
+        s_raw = df_age["Age_Group"].astype("string")
+
+        if include_unknown_age:
+            # Merge any blanks/NA/unknown-like into literal "Unknown"
+            s = coalesce_unknown(s_raw)
+            order = ["<35", "35–44", "45–54", "55–64", "65+", "Unknown"]
+        else:
+            # Ensure Unknown never appears when checkbox is OFF
+            s = s_raw[s_raw.ne("Unknown")]
+            order = ["<35", "35–44", "45–54", "55–64", "65+"]
+
+        agec = (
+            s.value_counts(dropna=False)
+             .reindex(order)
+             .fillna(0)
+             .rename_axis("Age Group")
+             .reset_index(name="Participants")
+        )
+
+        safe_plot(
+            agec,
+            lambda: plotly_show(
+                px.bar(agec, x="Age Group", y="Participants", title="Participants by Age Group"),
+                prefix="tab5_agegroup_bar"
+            )
+        )
 
     if "Gender" in df_f.columns:
         df_gender = add_unknown_checkbox_and_note(df_f, "Gender", key="gender_tab5", note_style="caption")
@@ -886,81 +915,80 @@ with tab_6:
         else:
             st.info("Required columns not found: ensure ‘Age_Group’ and the selected category column exist.")
 
-    with sub_country:
-        st.markdown("##### Country Distribution per Category")
+        with sub_country:
+            st.markdown("##### Country Distribution per Category")
 
-        cat_type = st.radio(
-            "Choose category type:",
-            ["Primary Category", "Secondary Category"],
-            key="country_cat_type",
-            horizontal=True
-        )
-        cat_col = cat_type
-        country_col = "Country Of Residence"
-
-        # Keep Exclude SG toggle (applies to this sub-tab)
-        exclude_sg_tab6 = st.checkbox(
-            "Exclude Singapore (reduce skew)", value=False, key="tab6_exclude_sg"
-        )
-
-        if (cat_col in df_f.columns) and (country_col in df_f.columns):
-            cat_values = (
-                df_f[cat_col].astype("string").fillna("Unknown").replace({"": "Unknown"}).unique().tolist()
+            cat_type = st.radio(
+                "Choose category type:",
+                ["Primary Category", "Secondary Category"],
+                key="country_cat_type",
+                horizontal=True
             )
-            cat_values = [v for v in sorted(cat_values) if v != "Unknown"] + (["Unknown"] if "Unknown" in cat_values else [])
-            selected_cat = st.selectbox(f"Select {cat_type}:", cat_values, key="country_cat_select")
+            cat_col = cat_type
+            country_col = "Country Of Residence"
 
-            subset = df_f[df_f[cat_col].astype("string").fillna("Unknown") == selected_cat].copy()
-            if subset.empty:
-                st.info("No rows for this selection.")
-            else:
-                # DQ note only (no checkbox)
-                dq_note_only(subset, country_col, "Country (this selection)")
+            # Exclude SG toggle (same behavior as Tab 2 Pareto)
+            exclude_sg_tab6 = st.checkbox(
+                "Exclude Singapore (reduce skew)", value=False, key="tab6_exclude_sg"
+            )
 
-                # Apply Exclude-SG if toggled
-                if exclude_sg_tab6:
-                    subset = subset[subset[country_col] != "Singapore"].copy()
-
-                # Include merged 'Unknown' bucket in distribution
-                s = coalesce_unknown(subset[country_col])
-
-                counts = s.value_counts(dropna=False)
-                total  = counts.sum()
-                pct    = (counts / total) * 100.0 if total > 0 else counts
-                cdf    = pct.reset_index()
-                cdf.columns = ["Country", "Percentage"]
-                cdf = cdf.sort_values("Percentage", ascending=False)
-
-                unknown_row      = cdf[cdf["Country"] == "Unknown"]
-                non_unknown_rows = cdf[cdf["Country"] != "Unknown"]
-                top_non_unknown  = non_unknown_rows.head(top_k).copy()
-
-                cdf_final = pd.concat([top_non_unknown, unknown_row], ignore_index=True) \
-                            .drop_duplicates(subset=["Country"])
-
-                # Optional "All other countries" (excluding Unknown)
-                remainder = non_unknown_rows.iloc[top_k:]
-                others_pct = float(remainder["Percentage"].sum()) if not remainder.empty else 0.0
-                if others_pct > 0:
-                    cdf_final = pd.concat(
-                        [cdf_final, pd.DataFrame([{"Country": "All other countries", "Percentage": others_pct}])],
-                        ignore_index=True
-                    )
-
-                text_labels = cdf_final["Percentage"].round(1).astype(str) + "%"
-                fig = px.bar(
-                    cdf_final,
-                    x="Country",
-                    y="Percentage",
-                    title=f"Country Distribution (%) – {cat_type}: {selected_cat}",
-                    text=text_labels,
+            if (cat_col in df_f.columns) and (country_col in df_f.columns):
+                # Category selector (keep Unknown at the end, just like elsewhere)
+                cat_values = (
+                    df_f[cat_col].astype("string").fillna("Unknown").replace({"": "Unknown"}).unique().tolist()
                 )
-                fig.update_traces(textposition="outside", cliponaxis=False)
-                ymax = min(100.0, float(cdf_final["Percentage"].max()) + 10.0) if not cdf_final.empty else 100.0
-                fig.update_layout(yaxis_range=[0, ymax], xaxis_tickangle=-45)
-                plotly_show(fig, prefix="tab6_country_dist_by_cat")
-        else:
-            st.info("Required columns not found: make sure ‘Country Of Residence’ and category columns exist in the dataset.")
+                cat_values = [v for v in sorted(cat_values) if v != "Unknown"] + (["Unknown"] if "Unknown" in cat_values else [])
+                selected_cat = st.selectbox(f"Select {cat_type}:", cat_values, key="country_cat_select")
+
+                subset = df_f[df_f[cat_col].astype("string").fillna("Unknown") == selected_cat].copy()
+                if subset.empty:
+                    st.info("No rows for this selection.")
+                else:
+                    # Same DQ note pattern as Tab 2
+                    dq_note_only(subset, country_col, "Country (this selection)")
+
+                    # Apply Exclude-SG first, like Tab 2 (case-insensitive)
+                    if exclude_sg_tab6:
+                        subset = subset[~_norm_str(subset[country_col]).eq("singapore")].copy()
+
+                    # Always drop Unknown/Missing, like Tab 2 Pareto
+                    s_norm = _norm_str(subset[country_col])
+                    mask_unknown = subset[country_col].isna() | s_norm.isin(UNKNOWN_LIKE)
+                    sub_valid = subset.loc[~mask_unknown].copy()
+
+                    if sub_valid.empty:
+                        st.info("No valid countries to display after removing Unknown (and Singapore, if excluded).")
+                    else:
+                        # Counts over the FULL shown universe (after SG filter, Unknown removed)
+                        counts_df = sub_valid[country_col].value_counts(dropna=False).reset_index()
+                        counts_df.columns = [country_col, "Participants"]
+
+                        # Denominator for percentages and caption share — same as Tab 2
+                        total_universe = int(counts_df["Participants"].sum())
+
+                        # Top-K slice
+                        final_df = counts_df.nlargest(int(top_k), "Participants").copy()
+                        final_df["Share_%"] = (final_df["Participants"] / total_universe * 100.0) if total_universe > 0 else 0.0
+
+                        # Plot with % labels (same style as Tab 2 Pareto)
+                        fig = px.bar(
+                            final_df,
+                            x=country_col,
+                            y="Participants",
+                            title=f"Top {int(top_k)} Countries by Participants — {cat_type}: {selected_cat}",
+                            text=final_df["Share_%"].round(1).astype(str) + "%",
+                        )
+                        fig.update_traces(textposition="outside", cliponaxis=False)
+                        fig.update_layout(xaxis_tickangle=-45, yaxis_title="Participants", xaxis_title="Country")
+                        plotly_show(fig, prefix="tab6_country_dist_by_cat_like_tab2")
+
+                        sg_note = " (Singapore excluded)" if exclude_sg_tab6 else ""
+                        st.caption(
+                            f"Total participants shown: {total_universe:,}{sg_note}. "
+                            f"Top {int(top_k)} countries account for {final_df['Share_%'].sum():.1f}% of the shown total."
+                        )
+            else:
+                st.info("Required columns not found: make sure ‘Country Of Residence’ and category columns exist in the dataset.")
 
 # --- Tab 7: Programme Cost
 with tab_7:
@@ -1134,18 +1162,43 @@ with tab_8:
 
     with colB:
         if "Age_Group" in p.columns:
+            # Apply Unknown filter based on deep dive toggle
             p_age = filter_unknown_no_ui(p, "Age_Group", include_unknown_deep)
             dq_caption(p, "Age_Group", "Age Group")
-            s = p_age["Age_Group"]
+
+            s = p_age["Age_Group"].astype("string")
+
+            # If include_unknown is ON, merge Unknown-like → "Unknown"
             if include_unknown_deep:
                 s = coalesce_unknown(s)
 
-            if s.empty:
+            # Build counts after filtering
+            age_counts = s.value_counts(dropna=False)
+
+            # Define ordering and respect filtered set
+            order_full = ["<35","35–44","45–54","55–64","65+","Unknown"]
+            present = [g for g in order_full if g in age_counts.index]
+
+            if not present:
                 st.info("No Age Group data to display for this programme.")
             else:
-                order_full = ["<35","35–44","45–54","55–64","65+","Unknown"]
-                agec = (s.value_counts(dropna=False).reindex(order_full).fillna(0).rename_axis("Age Group").reset_index(name="Participants"))
-                safe_plot(agec, lambda: plotly_show(px.bar(agec, x="Age Group", y="Participants", title="Age Group Distribution"), prefix="tab8_agegroup"))
+                age_df = (
+                    age_counts.reindex(present)
+                    .fillna(0)
+                    .rename_axis("Age Group")
+                    .reset_index(name="Participants")
+                )
+
+                fig = px.bar(
+                    age_df,
+                    x="Age Group",
+                    y="Participants",
+                    title="Age Group Distribution",
+                    text="Participants"
+                )
+                fig.update_traces(textposition="outside", cliponaxis=False)
+                plotly_show(fig, prefix="tab8_agegroup")
+
 
     st.markdown("##### Runs for this Programme")
     run_cols = [c for c in ["Truncated Programme Run", "Programme Start Date", "Programme End Date", "Country Of Residence", "Application Status"] if c in p.columns]
