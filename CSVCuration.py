@@ -356,7 +356,6 @@ def curate_programme_and_cost_data(programme_file, cost_file, output_path: Optio
 
     curated.drop(columns=['Topic_Label', 'Job Title Tagged'], inplace=True)
     curated.rename(columns={'Organisation Name: Organisation Name': 'Organisation Name'}, inplace=True)
-    curated.rename(columns={'Job Title Clean': 'Job Title'}, inplace=True)
     df_cost.rename(columns={'Programme Name': 'Truncated Programme Name'}, inplace=True)
 
     df_cost.to_csv("cost.csv", index=False)

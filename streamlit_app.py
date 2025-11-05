@@ -624,7 +624,7 @@ with tab3:
 with tab4:
     st.subheader("Top Job Titles & Organisations")
 
-    if "Job Title" in df_f.columns:
+    if "Job Title Clean" in df_f.columns:
         df_title = add_unknown_checkbox_and_note(df_f, "Job Title Clean", label="Job Title", key="job_title_tab4", note_style="caption")
         s_titles = df_title["Job Title Clean"]
         if "Unknown" in df_title["Job Title Clean"].astype("string").str.lower().unique() or df_title["Job Title Clean"].isna().any():
