@@ -1,14 +1,17 @@
 import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from umap import UMAP
 import hdbscan
 from bertopic import BERTopic
 import seaborn as sns
 from collections import Counter
 import re
 import os
-
+try:
+    from umap import UMAP
+except Exception:
+    import umap.umap_ as umap_
+    UMAP = umap_.UMAP
 
 from typing import Optional, Tuple, Union
 
