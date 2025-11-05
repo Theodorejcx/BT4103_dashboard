@@ -162,3 +162,52 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# --- Data files ---
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.json
+*.zip
+*.gz
+*.h5
+*.pickle
+*.pkl
+
+# Uploaded or temporary files
+uploaded_data/
+uploads/
+data/
+tmp/
+temp/
+
+# --- ML models & embeddings ---
+*.bin
+*.pt
+*.pth
+*.model
+*.onnx
+bertopic_models/
+models/
+model_cache/
+.umap/
+
+# Hugging Face cache and transformers
+.cache/
+huggingface/
+sentence_transformers/
+transformers/
+
+# --- Streamlit config ---
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+.streamlit/state.json
+.streamlit/*.lock
+
+# --- OS files ---
+Thumbs.db
+.DS_Store
+
+# --- Node (if ever used) ---
+node_modules/
