@@ -1164,34 +1164,37 @@ with tab_9:
     st.dataframe(df_f.sort_values("Run_Month").loc[:, preview_cols].head(500), use_container_width=True, hide_index=True)
     st.download_button("Download filtered CSV", data=df_f.to_csv(index=False).encode("utf-8-sig"), file_name="filtered_export.csv", mime="text/csv")
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 #  PDF Download Section
 # ──────────────────────────────────────────────────────────────────────────────
-st.divider()
-st.header("📥 Download PDF Report")
-st.info(
-    "Click the button below to generate a PDF report of all charts currently displayed "
-    "(respecting all active filters). This may take a moment."
-)
+with st.sidebar:
+    st.divider()
+    st.header("📥 Download PDF Report")
+    st.info(
+        "Generate a PDF of all charts based on the active filters. "
+        "A download button will appear below."
+    )
+    
+    if st.button("Generate PDF Report", key="btn_generate_pdf", use_container_width=True):
+        if not charts_for_pdf:
+            st.error("No charts were generated. Cannot create PDF.")
+            st.session_state.pdf_bytes = None # Clear any old PDF
+        else:
+            with st.spinner(f"Generating PDF with {len(charts_for_pdf)} charts..."):
+                try:
+                    # Store the generated PDF in session_state
+                    st.session_state.pdf_bytes = create_pdf_report(charts_for_pdf)
+                except Exception as e:
+                    st.error(f"An error occurred during PDF generation: {e}")
+                    st.session_state.pdf_bytes = None # Clear on failure
 
-if st.button("Generate PDF Report", key="btn_generate_pdf"):
-    if not charts_for_pdf:
-        st.error("No charts were generated for the current data/filters. Cannot create PDF.")
-    else:
-        with st.spinner(f"Generating PDF with {len(charts_for_pdf)} charts... This may take a moment."):
-            try:
-                # Create the PDF bytes in memory
-                pdf_bytes = create_pdf_report(charts_for_pdf)
-                
-                # Show the download button *after* generation
-                st.download_button(
-                    label="Click here to Download PDF",
-                    data=pdf_bytes,
-                    file_name="Dashboard_Report.pdf",
-                    mime="application/pdf",
-                )
-                st.success("PDF report is ready for download!")
-            except Exception as e:
-                st.error(f"An error occurred during PDF generation: {e}")
-                st.exception(e)
+    if st.session_state.pdf_bytes:
+        st.success("Your PDF report is ready!")
+        st.download_button(
+            label="Click here to Download PDF",
+            data=st.session_state.pdf_bytes,
+            file_name="Dashboard_Report.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            on_click=lambda: st.session_state.update(pdf_bytes=None)  
+        )
