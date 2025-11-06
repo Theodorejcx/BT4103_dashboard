@@ -19,13 +19,12 @@ import time
 import traceback
 from io import BytesIO
 
-# Set default export format using the new API if available, else old one.
+# Prefer the new defaults API; fall back silently if not available
 try:
-    # New API (Plotly ≥ 5.24): pio.defaults.to_image.* exists
     pio.defaults.to_image.format = "png"
 except Exception:
     try:
-        # Old path (will be removed after Sep 2025)
+        # Legacy (still works for now, but no chromium_args here)
         pio.kaleido.scope.default_format = "png"
     except Exception:
         pass
@@ -411,67 +410,19 @@ def _to_png_bytes_with_guard(fig, w: int, h: int) -> bytes:
 
 def _ensure_plotly_export_ready() -> tuple[bool, str]:
     """
-    Ensure Plotly image export (kaleido) can run. Returns (ok, note).
-    We try:
-      1) If chrome/chromium exists, quick export test.
-      2) Try a trivial to_image(); if it fails, attempt 'plotly_get_chrome -y'.
-      3) If still failing, return (False, helpful_message).
+    Returns (ok, note). Succeeds if fig.to_image works (Kaleido + libs + chromium).
     """
     import plotly.graph_objects as go
-
-    # If Chrome/Chromium is already available, try a tiny render
-    for bin_name in ("google-chrome", "chrome", "chromium", "chromium-browser"):
-        if shutil.which(bin_name):
-            try:
-                go.Figure().to_image(format="png", width=32, height=24, scale=1)
-                return True, f"Found Chromium/Chrome on PATH ({bin_name})."
-            except Exception as e:
-                # Chrome there but libs may be missing
-                return False, (
-                    "Chrome/Chromium detected but image export failed. "
-                    f"{e}\nThis often means the container/OS is missing shared libraries "
-                    "(e.g., libnss3, libgbm1, libatk-bridge2.0-0, etc.)."
-                )
-
-    # Try a trivial render; some managed envs bundle chromium
     try:
         go.Figure().to_image(format="png", width=32, height=24, scale=1)
-        return True, "Plotly export works (env provides Chromium)."
-    except Exception as e_first:
-        # Try to fetch Chrome automatically
-        cmds = []
-        cli = shutil.which("plotly_get_chrome")
-        if cli:
-            cmds.append([cli, "-y"])
-        cmds.append([sys.executable, "-m", "plotly_get_chrome", "-y"])
-
-        for cmd in cmds:
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-                if proc.returncode == 0:
-                    try:
-                        go.Figure().to_image(format="png", width=32, height=24, scale=1)
-                        return True, "Downloaded Chrome via plotly_get_chrome."
-                    except Exception as e_second:
-                        return False, (
-                            "Chrome download ran, but export still failed.\n"
-                            f"{e_second}\nLikely missing OS libs (see below)."
-                        )
-                else:
-                    # Helper exists but failed
-                    return False, (
-                        f"'{' '.join(cmd)}' failed:\n{proc.stderr.strip() or proc.stdout.strip()}\n"
-                        "Environment may block downloads or be missing OS libs."
-                    )
-            except FileNotFoundError:
-                continue
-            except Exception as e:
-                return False, f"Error running {' '.join(cmd)}: {e}"
-
-        # Couldn’t run helper; surface the original failure
+        return True, "Plotly export works."
+    except Exception as e:
         return False, (
-            "Chrome/Chromium not available and 'plotly_get_chrome' could not be invoked.\n"
-            f"Original error: {e_first}"
+            "Plotly/Kaleido image export failed. Ensure Chromium is installed and the common shared "
+            "libraries are present (libnss3, libatk-bridge2.0-0, libcups2, libxcomposite1, libxdamage1, "
+            "libxfixes3, libxrandr2, libgbm1, libxkbcommon0, libpango-1.0-0, libcairo2, libasound2, "
+            "libx11-6, libxext6, libxshmfence1, libx11-xcb1). "
+            f"Details: {e}"
         )
 
 def create_html_report(charts: list[tuple[str, "px.Figure"]]) -> bytes:
@@ -505,11 +456,12 @@ def create_html_report(charts: list[tuple[str, "px.Figure"]]) -> bytes:
 def kaleido_ready_msg():
     import plotly.express as px
     try:
-        fig = px.line(x=[0,1], y=[0,1], title="kaleido_smoke_test")
+        fig = px.line(x=[0, 1], y=[0, 1], title="kaleido_smoke_test")
         _ = fig.to_image(format="png", width=200, height=120, scale=1)
         return True, "Kaleido OK"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
 
 ok, msg = kaleido_ready_msg()
 st.caption(f"Image export status: {msg}")

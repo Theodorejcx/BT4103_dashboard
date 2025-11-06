@@ -13,3 +13,8 @@ libasound2
 fonts-dejavu
 fonts-liberation
 fonts-noto
+chromium
+libx11-6
+libxext6
+libxshmfence1
+libx11-xcb1
