@@ -6,6 +6,14 @@ import plotly.express as px
 import CSVCuration
 import io
 from fpdf import FPDF 
+import tempfile
+import subprocess
+import shutil
+import sys
+from typing import List, Tuple
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import copy
 
 st.set_page_config(page_title="EE Analytics Dashboard", layout="wide")
 
@@ -300,59 +308,294 @@ def safe_plot(check_df: pd.DataFrame, plot_callable):
 
 
 # PDF Generation
-def create_pdf_report(charts: list) -> bytes:
-    """Generates a PDF report from a list of (title, plotly_fig) tuples."""
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=False)
-    
-    # Standard page dimensions
-    page_w_mm = 297  # A4 Landscape
-    page_h_mm = 210
-    margin_mm = 10
-    
-    # Image dimensions 
-    img_w_mm = page_w_mm - (2 * margin_mm)  # 277
-    img_h_mm = page_h_mm - (2 * margin_mm) - 20 # 170 (leave 20mm for title)
-     
-    img_w_px = 1200
-    img_h_px = 700
+def _ensure_plotly_export_ready() -> tuple[bool, str]:
+    """
+    Ensure Plotly image export (kaleido) can run. Returns (ok, note).
+    We try:
+      1) If chrome/chromium exists, quick export test.
+      2) Try a trivial to_image(); if it fails, attempt 'plotly_get_chrome -y'.
+      3) If still failing, return (False, helpful_message).
+    """
+    import plotly.graph_objects as go
+
+    # If Chrome/Chromium is already available, try a tiny render
+    for bin_name in ("google-chrome", "chrome", "chromium", "chromium-browser"):
+        if shutil.which(bin_name):
+            try:
+                go.Figure().to_image(format="png", width=32, height=24, scale=1)
+                return True, f"Found Chromium/Chrome on PATH ({bin_name})."
+            except Exception as e:
+                # Chrome there but libs may be missing
+                return False, (
+                    "Chrome/Chromium detected but image export failed. "
+                    f"{e}\nThis often means the container/OS is missing shared libraries "
+                    "(e.g., libnss3, libgbm1, libatk-bridge2.0-0, etc.)."
+                )
+
+    # Try a trivial render; some managed envs bundle chromium
+    try:
+        go.Figure().to_image(format="png", width=32, height=24, scale=1)
+        return True, "Plotly export works (env provides Chromium)."
+    except Exception as e_first:
+        # Try to fetch Chrome automatically
+        cmds = []
+        cli = shutil.which("plotly_get_chrome")
+        if cli:
+            cmds.append([cli, "-y"])
+        cmds.append([sys.executable, "-m", "plotly_get_chrome", "-y"])
+
+        for cmd in cmds:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                if proc.returncode == 0:
+                    try:
+                        go.Figure().to_image(format="png", width=32, height=24, scale=1)
+                        return True, "Downloaded Chrome via plotly_get_chrome."
+                    except Exception as e_second:
+                        return False, (
+                            "Chrome download ran, but export still failed.\n"
+                            f"{e_second}\nLikely missing OS libs (see below)."
+                        )
+                else:
+                    # Helper exists but failed
+                    return False, (
+                        f"'{' '.join(cmd)}' failed:\n{proc.stderr.strip() or proc.stdout.strip()}\n"
+                        "Environment may block downloads or be missing OS libs."
+                    )
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                return False, f"Error running {' '.join(cmd)}: {e}"
+
+        # Couldn’t run helper; surface the original failure
+        return False, (
+            "Chrome/Chromium not available and 'plotly_get_chrome' could not be invoked.\n"
+            f"Original error: {e_first}"
+        )
+
+def create_html_report(charts: list[tuple[str, "px.Figure"]]) -> bytes:
+    """
+    Build a single self-contained HTML with all charts (interactive).
+    Applies export styling per figure. Uses SGT for timestamp.
+    """
+    now_sgt = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y-%m-%d %H:%M:%S")
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        "<title>EE Analytics Report</title>",
+        ("<style>"
+         "body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:24px;}"
+         "h1{font-size:22px;margin:0 0 8px 0;}"
+         "h2{font-size:18px;margin:20px 0 8px 0;}"
+         "hr{margin:24px 0;border:0;border-top:1px solid #ddd;}"
+         "</style>"),
+        "</head><body>",
+        f"<h1>EE Analytics Report</h1><p>Generated: {now_sgt}</p><hr/>"
+    ]
 
     for title, fig in charts:
-        try:
-            pdf.add_page()
-            
-            # --- Title ---
-            pdf.set_font("Arial", "B", 14)
-            pdf.set_xy(margin_mm, margin_mm)
-            pdf.cell(w=img_w_mm, h=10, txt=title or "Untitled Chart", border=0, ln=1, align="C")
+        parts.append(f"<h2>{(title or 'Untitled Chart')}</h2>")
+        styled = _style_for_export(fig)
+        parts.append(styled.to_html(full_html=False, include_plotlyjs="inline"))
+        parts.append("<hr/>")
 
-            # --- Chart Image ---
-            # Convert Plotly fig to image bytes
-            img_bytes = fig.to_image(format="png", width=img_w_px, height=img_h_px, scale=1)
-            img_io = io.BytesIO(img_bytes)
+    parts.append("</body></html>")
+    return "\n".join(parts).encode("utf-8")
 
-            # Add image to PDF
-            # Center the image block
-            img_x_pos = margin_mm
-            img_y_pos = margin_mm + 15  # Place it below the title
-            pdf.image(img_io, x=img_x_pos, y=img_y_pos, w=img_w_mm, h=img_h_mm)
 
-        except Exception as e:
-            # Add an error page if a chart fails
-            st.error(f"Failed to render chart: {title}. Error: {e}")
+def create_pdf_report(charts: List[Tuple[str, "px.Figure"]]) -> bytes:
+    """
+    Build a landscape A4 PDF from (title, plotly_fig) tuples.
+    Requires Chrome/Chromium + shared libs for kaleido.
+    - Uses temp files for FPDF.image().
+    - Adds an error page per failed chart (so the PDF is still informative).
+    - Raises if all charts fail so caller can show a clean message.
+    """
+    ok, note = _ensure_plotly_export_ready()
+    if not ok:
+        # Be specific about the usual missing-libs fix
+        missing_libs_cmd = (
+            "sudo apt update && sudo apt-get install -y "
+            "libnss3 libatk-bridge2.0-0 libcups2 libxcomposite1 libxdamage1 "
+            "libxfixes3 libxrandr2 libgbm1 libxkbcommon0 libpango-1.0-0 "
+            "libcairo2 libasound2"
+        )
+        raise RuntimeError(
+            "Plotly image export is not ready.\n"
+            f"{note}\n\n"
+            "If you control the environment, install required OS libraries:\n"
+            f"$ {missing_libs_cmd}\n\n"
+            "Alternatively, use the HTML export option (no Chrome required)."
+        )
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=False)
+
+    page_w_mm, page_h_mm, margin_mm = 297, 210, 10
+    img_w_mm = page_w_mm - 2 * margin_mm
+    img_h_mm = page_h_mm - 2 * margin_mm - 20  # ~20mm reserved for title
+
+    img_w_px, img_h_px = 1400, 800  # crisp but not huge
+
+    tmp_paths: List[str] = []
+    success = 0
+
+    try:
+        for title, fig in charts:
             try:
+                img_bytes = fig.to_image(format="png", width=img_w_px, height=img_h_px, scale=1)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    tmp.write(img_bytes)
+                    img_path = tmp.name
+                    tmp_paths.append(img_path)
+
                 pdf.add_page()
                 pdf.set_font("Arial", "B", 14)
                 pdf.set_xy(margin_mm, margin_mm)
-                pdf.cell(w=img_w_mm, h=10, txt=f"Error rendering chart: {title}", border=0, ln=1, align="C")
+                pdf.cell(w=img_w_mm, h=10, txt=(title or "Untitled Chart"), border=0, ln=1, align="C")
+                pdf.image(img_path, x=margin_mm, y=margin_mm + 15, w=img_w_mm, h=img_h_mm)
+                success += 1
+
+            except Exception as e:
+                # Chart-specific error page (so users know which chart failed and why)
+                pdf.add_page()
+                pdf.set_font("Arial", "B", 14)
+                pdf.set_xy(margin_mm, margin_mm)
+                pdf.cell(w=img_w_mm, h=10, txt=f"Error rendering chart: {title or 'Untitled'}", border=0, ln=1, align="C")
                 pdf.set_font("Arial", "", 10)
                 pdf.set_xy(margin_mm, margin_mm + 15)
-                pdf.multi_cell(w=img_w_mm, h=10, txt=str(e), border=1, align="L")
-            except Exception:
-                pass # Failsafe
+                pdf.multi_cell(w=img_w_mm, h=6, txt=str(e), border=1, align="L")
 
-    # Output PDF as bytes
-    return pdf.output(dest='S').encode('latin-1')
+        if success == 0:
+            raise RuntimeError(
+                "All chart exports failed. This environment likely lacks required Chromium libraries. "
+                "Use HTML export or install the OS libs (see message above)."
+            )
+
+        return pdf.output(dest="S").encode("latin-1")
+
+    finally:
+        for p in tmp_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+def _style_for_export(fig, *, kind: str | None = None):
+    """
+    Safe export styling:
+    - plotly_white template, consistent fonts
+    - Force BLUE for non-geo/heatmap/pie using update_traces (robust)
+    - Fix heatmap/long y-label margins
+    - Ensure scatter lines show markers for readability
+    """
+    import copy
+    f = copy.deepcopy(fig)
+
+    # Defensive: if f.data is None, make it an empty tuple
+    data = tuple(getattr(f, "data", ()) or ())
+
+    # Identify trace types (robust)
+    trace_types = set()
+    for t in data:
+        ttype = getattr(t, "type", "") or ""
+        trace_types.add(ttype)
+
+    is_geo     = any(t in trace_types for t in ("scattergeo", "choropleth"))
+    is_heatmap = any(t in trace_types for t in ("heatmap", "imshow"))
+    is_pie     = "pie" in trace_types
+
+    # Base layout
+    f.update_layout(
+        template="plotly_white",
+        font=dict(family="Inter, Segoe UI, Roboto, Arial, sans-serif", size=12),
+        title=dict(font=dict(size=18)),
+        legend=dict(font=dict(size=11)),
+        margin=dict(l=80, r=20, t=60, b=60),
+        xaxis_title_standoff=30,
+        yaxis_title_standoff=40,
+    )
+    # --- Hover tooltip styling ---
+    f.update_layout(
+        hovermode="closest",
+        hoverlabel=dict(
+            bgcolor="white",
+            font_color="black",
+            font_size=12,
+            bordercolor="black"
+        )
+    )
+    f.update_xaxes(automargin=True, tickangle=0)
+    f.update_yaxes(automargin=True)
+
+    BLUE = "#1f77b4"
+
+    # Force blue for all NON geo/heatmap/pie traces using safe selectors
+    if not (is_geo or is_heatmap or is_pie):
+        # Bars & histograms
+        f.update_traces(marker_color=BLUE, selector=dict(type="bar"))
+        f.update_traces(marker_color=BLUE, selector=dict(type="histogram"))
+        f.update_traces(marker_color=BLUE, selector=dict(type="barpolar"))
+
+        # Lines/markers (scatter & scattergl)
+        f.update_traces(
+            line=dict(color=BLUE),
+            selector=dict(type="scatter")
+        )
+        f.update_traces(
+            marker=dict(color=BLUE, line=dict(color=BLUE)),
+            selector=dict(type="scatter")
+        )
+        f.update_traces(
+            line=dict(color=BLUE),
+            selector=dict(type="scattergl")
+        )
+        f.update_traces(
+            marker=dict(color=BLUE, line=dict(color=BLUE)),
+            selector=dict(type="scattergl")
+        )
+        # Box/violin/funnel/waterfall (best-effort colorization)
+        f.update_traces(marker_color=BLUE, selector=dict(type="box"))
+        f.update_traces(marker_color=BLUE, selector=dict(type="violin"))
+        f.update_traces(marker_color=BLUE, selector=dict(type="funnel"))
+        f.update_traces(marker_color=BLUE, selector=dict(type="waterfall"))
+
+        # Make scatter charts show markers for readability
+        # (Do not override if user set a custom mode; just add markers if lines present)
+        for t in data:
+            if getattr(t, "type", "") in ("scatter", "scattergl"):
+                mode = getattr(t, "mode", "lines") or "lines"
+                if "lines" in mode and "markers" not in mode:
+                    t.mode = mode + "+markers"
+
+    # Heatmaps: extra left margin so y tick labels don't clash with axis title
+    if is_heatmap:
+        cur_l = int((f.layout.margin.l or 0))
+        f.update_layout(margin=dict(l=max(cur_l, 120)))
+        f.update_yaxes(tickangle=0)
+
+    # Horizontal bars: dynamic left margin & height (long label support)
+    if "bar" in trace_types:
+        # Check if any bar is horizontal
+        any_h = any(getattr(t, "orientation", None) == "h" for t in data if getattr(t, "type", "") == "bar")
+        if any_h:
+            yvals = []
+            for t in data:
+                if getattr(t, "type", "") == "bar" and getattr(t, "orientation", None) == "h":
+                    y = getattr(t, "y", None)
+                    if y is not None:
+                        yvals = [str(v) for v in list(y)]
+                        break
+            max_label_len = max((len(s) for s in yvals), default=12)
+            left_padding = int(min(max(120, max_label_len * 7), 340))
+            f.update_layout(margin=dict(l=left_padding))
+            nrows = len(set(yvals)) or 6
+            base_h = 28 * nrows + 140
+            f.update_layout(height=min(max(base_h, 360), 1200))
+
+    return f
+
+
+
+
 # ------------------------------------------------------------------------------
 
 
@@ -1169,35 +1412,57 @@ with tab_9:
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.divider()
-    st.header("📥 Download PDF Report")
-    st.info(
-        "Generate a PDF of all charts based on the active filters. "
-        "A download button will appear below."
+    st.header("📥 Download Report")
+    st.caption("Choose format. PDF needs Chrome/Chromium + OS libs. HTML works anywhere (interactive).")
+
+    if "report_bytes" not in st.session_state:
+        st.session_state.report_bytes = None
+    if "report_kind" not in st.session_state:
+        st.session_state.report_kind = None
+
+    export_kind = st.radio(
+        "Format",
+        ["PDF (requires Chrome)", "HTML (interactive, no Chrome)"],
+        index=0,
+        horizontal=False,
+        key="export_kind_radio",
     )
 
-    if "pdf_bytes" not in st.session_state:
-        st.session_state.pdf_bytes = None
-    
-    if st.button("Generate PDF Report", key="btn_generate_pdf", use_container_width=True):
-        if not charts_for_pdf:
-            st.error("No charts were generated. Cannot create PDF.")
-            st.session_state.pdf_bytes = None # Clear any old PDF
-        else:
-            with st.spinner(f"Generating PDF with {len(charts_for_pdf)} charts..."):
-                try:
-                    # Store the generated PDF in session_state
-                    st.session_state.pdf_bytes = create_pdf_report(charts_for_pdf)
-                except Exception as e:
-                    st.error(f"An error occurred during PDF generation: {e}")
-                    st.session_state.pdf_bytes = None # Clear on failure
-                    
-    if st.session_state.pdf_bytes:
-        st.success("Your PDF report is ready!")
+    queued = len(charts_for_pdf)
+    st.caption(f"Charts queued for export: **{queued}**")
+
+    disabled = (queued == 0)
+    if disabled:
+        st.warning("No charts are on the page yet. Visit the tabs so charts render before exporting.")
+
+    if st.button("Generate Report", use_container_width=True, disabled=disabled):
+        with st.spinner(f"Generating {export_kind.split()[0]} with {queued} charts…"):
+            try:
+                if export_kind.startswith("PDF"):
+                    st.session_state.report_bytes = create_pdf_report(charts_for_pdf)
+                    st.session_state.report_kind = "pdf"
+                    st.success("PDF is ready.")
+                else:
+                    st.session_state.report_bytes = create_html_report(charts_for_pdf)
+                    st.session_state.report_kind = "html"
+                    st.success("HTML is ready.")
+            except RuntimeError as re:
+                st.error(str(re))
+                st.session_state.report_bytes = None
+                st.session_state.report_kind = None
+            except Exception as e:
+                st.error(f"Unexpected error during report generation: {e}")
+                st.session_state.report_bytes = None
+                st.session_state.report_kind = None
+
+    if st.session_state.report_bytes:
+        fname = "Dashboard_Report.pdf" if st.session_state.report_kind == "pdf" else "Dashboard_Report.html"
+        mime  = "application/pdf" if st.session_state.report_kind == "pdf" else "text/html"
         st.download_button(
-            label="Click here to Download PDF",
-            data=st.session_state.pdf_bytes,
-            file_name="Dashboard_Report.pdf",
-            mime="application/pdf",
+            label=f"Download {fname.split('.')[-1].upper()}",
+            data=st.session_state.report_bytes,
+            file_name=fname,
+            mime=mime,
             use_container_width=True,
-            on_click=lambda: st.session_state.update(pdf_bytes=None)  
+            on_click=lambda: st.session_state.update(report_bytes=None, report_kind=None),
         )
