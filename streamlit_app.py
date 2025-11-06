@@ -14,6 +14,10 @@ from typing import List, Tuple
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import copy
+import plotly.io as pio
+import time
+import traceback
+from io import BytesIO
 
 st.set_page_config(page_title="EE Analytics Dashboard", layout="wide")
 
@@ -308,6 +312,92 @@ def safe_plot(check_df: pd.DataFrame, plot_callable):
 
 
 # PDF Generation
+K_CHROME_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--headless=new",
+]
+
+def _kaleido_preflight(max_retries: int = 2) -> tuple[bool, str]:
+    """
+    Try a tiny export to check if Kaleido + Chrome are usable.
+    Returns (ok, message). Memoize via st.session_state to avoid repeat work.
+    """
+    # Already checked in this session?
+    if "kaleido_ok" in st.session_state and "kaleido_msg" in st.session_state:
+        return st.session_state.kaleido_ok, st.session_state.kaleido_msg
+
+    # Configure Kaleido scope safely
+    try:
+        # Some envs error if scope isn't created before .to_image
+        pio.kaleido.scope.default_format = "png"
+        pio.kaleido.scope.chromium_args = K_CHROME_ARGS
+    except Exception:
+        # Older plotly may not expose kaleido.scope; ignore
+        pass
+
+    # Build tiny test fig
+    try:
+        import plotly.graph_objects as go
+        test = go.Figure(go.Scatter(x=[0,1], y=[0,1]))
+        test.update_layout(template="plotly_white")
+        err = None
+        for _ in range(max_retries + 1):
+            try:
+                _ = test.to_image(format="png", width=200, height=120, scale=1)
+                err = None
+                break
+            except Exception as e:
+                err = e
+                time.sleep(0.5)
+        if err:
+            msg = (
+                "Plotly image export (Kaleido) is not ready. "
+                "This environment is missing required Chrome/OS libraries.\n\n"
+                "Fix on a Debian/Ubuntu-like image:\n"
+                "  sudo apt update && sudo apt-get install -y "
+                "libnss3 libatk-bridge2.0-0 libcups2 libxcomposite1 libxdamage1 "
+                "libxfixes3 libxrandr2 libgbm1 libxkbcommon0 libpango-1.0-0 libcairo2 libasound2\n\n"
+                "On Streamlit Cloud:\n"
+                "  - Add 'plotly-get-chrome' to requirements.txt\n"
+                "  - (Optional) add packages.txt with the above libs"
+            )
+            st.session_state.kaleido_ok = False
+            st.session_state.kaleido_msg = msg + f"\n\nDetails: {repr(err)}"
+            return False, st.session_state.kaleido_msg
+        else:
+            st.session_state.kaleido_ok = True
+            st.session_state.kaleido_msg = "Kaleido export is ready."
+            return True, st.session_state.kaleido_msg
+    except Exception as e:
+        msg = "Kaleido preflight failed unexpectedly.\n\n" + traceback.format_exc()
+        st.session_state.kaleido_ok = False
+        st.session_state.kaleido_msg = msg
+        return False, st.session_state.kaleido_msg
+
+
+def _to_png_bytes_with_guard(fig, w: int, h: int) -> bytes:
+    """
+    Export a figure to PNG with Kaleido, with retries and scope args.
+    Raises the final Exception if not possible.
+    """
+    try:
+        pio.kaleido.scope.default_format = "png"
+        pio.kaleido.scope.chromium_args = K_CHROME_ARGS
+    except Exception:
+        pass
+
+    last_err = None
+    for _ in range(2):
+        try:
+            return fig.to_image(format="png", width=w, height=h, scale=1)
+        except Exception as e:
+            last_err = e
+            time.sleep(0.3)
+    raise last_err
+
 def _ensure_plotly_export_ready() -> tuple[bool, str]:
     """
     Ensure Plotly image export (kaleido) can run. Returns (ok, note).
@@ -442,7 +532,10 @@ def create_pdf_report(charts: List[Tuple[str, "px.Figure"]]) -> bytes:
     try:
         for title, fig in charts:
             try:
-                img_bytes = fig.to_image(format="png", width=img_w_px, height=img_h_px, scale=1)
+                styled = _style_for_export(fig)
+                img_bytes = _to_png_bytes_with_guard(styled, img_w_px, img_h_px)
+                img_io = io.BytesIO(img_bytes)
+                pdf.image(img_io, x=img_x_pos, y=img_y_pos, w=img_w_mm, h=img_h_mm)
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                     tmp.write(img_bytes)
                     img_path = tmp.name
@@ -1412,57 +1505,60 @@ with tab_9:
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.divider()
-    st.header("📥 Download Report")
-    st.caption("Choose format. PDF needs Chrome/Chromium + OS libs. HTML works anywhere (interactive).")
+    st.header("📥 Download PDF Report")
 
-    if "report_bytes" not in st.session_state:
-        st.session_state.report_bytes = None
-    if "report_kind" not in st.session_state:
-        st.session_state.report_kind = None
+    # Show Kaleido readiness
+    ok, msg = _kaleido_preflight()
+    if ok:
+        st.success("PDF export: Ready")
+    else:
+        st.warning("PDF export: Not ready")
+        with st.expander("Why it’s not ready / how to fix"):
+            st.code(msg)
 
-    export_kind = st.radio(
-        "Format",
-        ["PDF (requires Chrome)", "HTML (interactive, no Chrome)"],
-        index=0,
-        horizontal=False,
-        key="export_kind_radio",
-    )
+    st.info("Tip: You can always download the interactive HTML report from the main app.")
 
-    queued = len(charts_for_pdf)
-    st.caption(f"Charts queued for export: **{queued}**")
+    if "pdf_bytes" not in st.session_state:
+        st.session_state.pdf_bytes = None
 
-    disabled = (queued == 0)
-    if disabled:
-        st.warning("No charts are on the page yet. Visit the tabs so charts render before exporting.")
+    # Disable the button when not ready, to avoid the scary crash banner
+    disabled_flag = not ok
 
-    if st.button("Generate Report", use_container_width=True, disabled=disabled):
-        with st.spinner(f"Generating {export_kind.split()[0]} with {queued} charts…"):
-            try:
-                if export_kind.startswith("PDF"):
-                    st.session_state.report_bytes = create_pdf_report(charts_for_pdf)
-                    st.session_state.report_kind = "pdf"
-                    st.success("PDF is ready.")
-                else:
-                    st.session_state.report_bytes = create_html_report(charts_for_pdf)
-                    st.session_state.report_kind = "html"
-                    st.success("HTML is ready.")
-            except RuntimeError as re:
-                st.error(str(re))
-                st.session_state.report_bytes = None
-                st.session_state.report_kind = None
-            except Exception as e:
-                st.error(f"Unexpected error during report generation: {e}")
-                st.session_state.report_bytes = None
-                st.session_state.report_kind = None
+    if st.button("Generate PDF Report", key="btn_generate_pdf", use_container_width=True, disabled=disabled_flag):
+        if not charts_for_pdf:
+            st.error("No charts were generated. Cannot create PDF.")
+            st.session_state.pdf_bytes = None
+        else:
+            with st.spinner(f"Generating PDF with {len(charts_for_pdf)} charts..."):
+                try:
+                    st.session_state.pdf_bytes = create_pdf_report(charts_for_pdf)
+                except Exception as e:
+                    st.error(f"PDF generation error:\n{e}")
+                    st.session_state.pdf_bytes = None
 
-    if st.session_state.report_bytes:
-        fname = "Dashboard_Report.pdf" if st.session_state.report_kind == "pdf" else "Dashboard_Report.html"
-        mime  = "application/pdf" if st.session_state.report_kind == "pdf" else "text/html"
+    if st.session_state.pdf_bytes:
+        st.success("Your PDF report is ready!")
         st.download_button(
-            label=f"Download {fname.split('.')[-1].upper()}",
-            data=st.session_state.report_bytes,
-            file_name=fname,
-            mime=mime,
+            label="Click here to Download PDF",
+            data=st.session_state.pdf_bytes,
+            file_name="Dashboard_Report.pdf",
+            mime="application/pdf",
             use_container_width=True,
-            on_click=lambda: st.session_state.update(report_bytes=None, report_kind=None),
+            on_click=lambda: st.session_state.update(pdf_bytes=None)
+        )
+
+    if "html_bytes" not in st.session_state:
+        st.session_state.html_bytes = None
+
+    if st.button("Generate HTML Report", key="btn_generate_html"):
+        # re-use your create_html_report(charts_for_pdf)
+        from datetime import datetime
+        st.session_state.html_bytes = create_html_report(charts_for_pdf)
+
+    if st.session_state.html_bytes:
+        st.download_button(
+            "Download HTML Report (Interactive)",
+            data=st.session_state.html_bytes,
+            file_name="Dashboard_Report.html",
+            mime="text/html",
         )
