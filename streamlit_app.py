@@ -19,19 +19,10 @@ import time
 import traceback
 from io import BytesIO
 
-# For Plotly 5 + Kaleido 0.2.x on Streamlit Cloud
 try:
-    pio.kaleido.scope.default_format = "png"
-    pio.kaleido.scope.default_scale = 1
-    pio.kaleido.scope.chromium_args = [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--disable-software-rasterizer",
-        "--headless=new",
-    ]
-except Exception as e:
-    st.sidebar.warning(f"Kaleido init warning: {e}")
+    pio.kaleido.scope.chromium_args = ["--no-sandbox", "--disable-dev-shm-usage"]
+except Exception:
+    pass
 
 st.set_page_config(page_title="EE Analytics Dashboard", layout="wide")
 
