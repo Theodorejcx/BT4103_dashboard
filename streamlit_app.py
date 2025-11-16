@@ -326,7 +326,7 @@ def _style_for_export(fig, *, kind: str | None = None):
     """
     Safe export styling:
     - plotly_white template, consistent fonts
-    - Force BLUE for non-geo/heatmap/pie using update_traces (robust)
+    - Force BLUE for non-geo/heatmap/pie using update_traces
     - Fix heatmap/long y-label margins
     - Ensure scatter lines show markers for readability
     """
@@ -1198,7 +1198,7 @@ with tab_9:
     st.download_button("Download filtered CSV", data=df_f.to_csv(index=False).encode("utf-8-sig"), file_name="filtered_export.csv", mime="text/csv")
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  HTML Download Section (only)
+#  HTML Download Section
 # ──────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.divider()
