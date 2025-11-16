@@ -17,8 +17,8 @@ Before running this project, ensure you have:
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/Theodorejcx/BT4103_Capstone
-cd BT4103_Capstone
+git clone https://github.com/Theodorejcx/BT4103_dashboard
+cd BT4103_dashboard
 ```
 
 ### 2. Install Dependencies
