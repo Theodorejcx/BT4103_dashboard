@@ -154,10 +154,11 @@ COL_MAP = {
     "Applicant Type": "Applicant Type",
     "Seniority": "Seniority",
     "Domain": "Domain",
+    "Programme": "Truncated Programme Name",
 }
 UI_FILTER_LABELS = [
     "Application Status", "Applicant Type", "Pri Category",
-    "Sec Category", "Country", "Seniority", "Domain"
+    "Sec Category", "Country", "Seniority", "Domain", "Programme"
 ]
 
 def _col_from_label(label: str) -> str:
@@ -470,6 +471,7 @@ with st.sidebar:
     sel_country  = multiselect_with_all_button("Country", df)
     sel_senior   = multiselect_with_all_button("Seniority", df)
     sel_domain   = multiselect_with_all_button("Domain", df)
+    sel_programme = multiselect_with_all_button("Programme", df)
     top_k = st.number_input("Top K (for Top-X charts)", min_value=3, max_value=50, value=10, step=1)
 
 # Apply filters
@@ -480,7 +482,8 @@ mask = (
     apply_filter(df.get(_col_from_label("Sec Category"),       pd.Series(index=df.index)), sel_secncat) &
     apply_filter(df.get(_col_from_label("Country"),            pd.Series(index=df.index)), sel_country) &
     apply_filter(df.get(_col_from_label("Seniority"),          pd.Series(index=df.index)), sel_senior) &
-    apply_filter(df.get(_col_from_label("Domain"),             pd.Series(index=df.index)), sel_domain)
+    apply_filter(df.get(_col_from_label("Domain"),             pd.Series(index=df.index)), sel_domain) &
+    apply_filter(df.get(_col_from_label("Programme"),          pd.Series(index=df.index)), sel_programme)
 )
 df_f = df[mask].copy()
 st.caption(f"Showing **{len(df_f):,}** of **{len(df):,}** rows after filters")
